@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 // Copyright 2016 Cilium Project
@@ -52,10 +53,24 @@ import (
 #include <sys/socket.h>
 #include <linux/unistd.h>
 #include <linux/bpf.h>
-#include "bpf_map.h"
 #include <poll.h>
 #include <linux/perf_event.h>
 #include <sys/resource.h>
+#define BUF_SIZE_MAP_NS 256
+typedef struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+} bpf_map_def;
+
+enum bpf_pin_type {
+	PIN_NONE = 0,
+	PIN_OBJECT_NS,
+	PIN_GLOBAL_NS,
+	PIN_CUSTOM_NS,
+};
 
 typedef struct bpf_map {
 	int         fd;
@@ -145,25 +160,6 @@ static bpf_map *bpf_load_map(bpf_map_def *map_def, const char *path)
 
 	memcpy(&map->def, map_def, sizeof(bpf_map_def));
 
-	switch (map_def->pinning) {
-	case 1: // PIN_OBJECT_NS
-		// TODO to be implemented
-		free(map);
-		return 0;
-	case 2: // PIN_GLOBAL_NS
-	case 3: // PIN_CUSTOM_NS
-		if (stat(path, &st) == 0) {
-			ret = get_pinned_obj_fd(path);
-			if (ret < 0) {
-				free(map);
-				return 0;
-			}
-			map->fd = ret;
-			return map;
-		}
-		do_pin = 1;
-	}
-
 	map->fd = bpf_create_map(map_def->type,
 		map_def->key_size,
 		map_def->value_size,
@@ -176,13 +172,6 @@ static bpf_map *bpf_load_map(bpf_map_def *map_def, const char *path)
 		return 0;
 	}
 
-	if (do_pin) {
-		ret = bpf_pin_object(map->fd, path);
-		if (ret < 0) {
-			free(map);
-			return 0;
-		}
-	}
 
 	return map;
 }
@@ -202,7 +191,7 @@ static int bpf_prog_load(enum bpf_prog_type prog_type,
 	attr.license = ptr_to_u64((void *) license);
 	attr.log_buf = ptr_to_u64(log_buf);
 	attr.log_size = log_size;
-	attr.log_level = 1;
+	attr.log_level = 6;
 	attr.kern_version = kern_version;
 
 	ret = syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
@@ -322,31 +311,8 @@ func validateMapPath(path string) bool {
 	return filepath.Clean(path) == path
 }
 
-func getMapNamespace(mapDef *C.bpf_map_def) string {
-	namespacePtr := &mapDef.namespace[0]
-	return C.GoStringN(namespacePtr, C.int(C.strnlen(namespacePtr, C.BUF_SIZE_MAP_NS)))
-}
-
 func getMapPath(mapDef *C.bpf_map_def, mapName, pinPath string) (string, error) {
 	var mapPath string
-	switch mapDef.pinning {
-	case PIN_OBJECT_NS:
-		return "", fmt.Errorf("not implemented yet")
-	case PIN_GLOBAL_NS:
-		namespace := getMapNamespace(mapDef)
-		if namespace == "" {
-			return "", fmt.Errorf("map %q has empty namespace", mapName)
-		}
-		mapPath = filepath.Join(BPFFSPath, namespace, BPFDirGlobals, mapName)
-	case PIN_CUSTOM_NS:
-		if pinPath == "" {
-			return "", fmt.Errorf("no pin path given for map %q with PIN_CUSTOM_NS", mapName)
-		}
-		mapPath = filepath.Join(BPFFSPath, pinPath)
-	default:
-		// map is not pinned
-		return "", nil
-	}
 	return mapPath, nil
 }
 
@@ -377,8 +343,10 @@ func elfReadMaps(file *elf.File, params map[string]SectionParams) (map[string]*M
 		if err != nil {
 			return nil, err
 		}
+
 		if len(data) != C.sizeof_struct_bpf_map_def {
-			return nil, fmt.Errorf("only one map with size %d bytes allowed per section (check bpf_map_def)", C.sizeof_struct_bpf_map_def)
+			//return nil, fmt.Errorf("only one map with size %d bytes allowed per section (check bpf_map_def): %v", C.sizeof_struct_bpf_map_def, len(data))
+			fmt.Printf("only one map with size %d bytes allowed per section (check bpf_map_def): %v\n", C.sizeof_struct_bpf_map_def, name)
 		}
 
 		mapDef := (*C.bpf_map_def)(unsafe.Pointer(&data[0]))
@@ -632,7 +600,7 @@ func (b *Module) Load(parameters map[string]SectionParams) error {
 					(*C.char)(lp), C.int(version),
 					(*C.char)(unsafe.Pointer(&b.log[0])), C.int(len(b.log)))
 				if progFd < 0 {
-					return fmt.Errorf("error while loading %q (%v):\n%s", secName, err, b.log)
+					return fmt.Errorf("error while loading prog %q (%v):\n%s", secName, err, b.log)
 				}
 
 				switch {
@@ -685,9 +653,9 @@ func (b *Module) Load(parameters map[string]SectionParams) error {
 					}
 				case isXDP:
 					b.xdpPrograms[secName] = &XDPProgram{
-						Name: secName,
+						Name:  secName,
 						insns: insns,
-						fd: int(progFd),
+						fd:    int(progFd),
 					}
 				}
 			}
@@ -769,7 +737,7 @@ func (b *Module) Load(parameters map[string]SectionParams) error {
 				(*C.char)(lp), C.int(version),
 				(*C.char)(unsafe.Pointer(&b.log[0])), C.int(len(b.log)))
 			if progFd < 0 {
-				return fmt.Errorf("error while loading %q (%v):\n%s", section.Name, err, b.log)
+				return fmt.Errorf("error while loading 781 %q (%v):\n%s", section.Name, err, b.log)
 			}
 
 			switch {
@@ -822,9 +790,9 @@ func (b *Module) Load(parameters map[string]SectionParams) error {
 				}
 			case isXDP:
 				b.xdpPrograms[secName] = &XDPProgram{
-					Name: secName,
+					Name:  secName,
 					insns: insns,
-					fd: int(progFd),
+					fd:    int(progFd),
 				}
 			}
 		}

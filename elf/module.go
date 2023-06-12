@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 // Copyright 2016 Cilium Project
@@ -827,26 +828,6 @@ func unpinMap(m *Map, pinPath string) error {
 
 func (b *Module) closeMaps(options map[string]CloseOptions) error {
 	for _, m := range b.maps {
-		doUnpin := options[fmt.Sprintf("maps/%s", m.Name)].Unpin
-		if doUnpin {
-			mapDef := m.m.def
-			var pinPath string
-			if mapDef.pinning == PIN_CUSTOM_NS {
-				closeOption, ok := options[fmt.Sprintf("maps/%s", m.Name)]
-				if !ok {
-					return fmt.Errorf("close option for maps/%s must have PinPath set", m.Name)
-				}
-				pinPath = closeOption.PinPath
-			} else if mapDef.pinning == PIN_GLOBAL_NS {
-				// mapDef.namespace is used for PIN_GLOBAL_NS maps
-				pinPath = ""
-			} else if mapDef.pinning == PIN_OBJECT_NS {
-				return fmt.Errorf("unpinning with PIN_OBJECT_NS is to be implemented")
-			}
-			if err := unpinMap(m, pinPath); err != nil {
-				return fmt.Errorf("error unpinning map %q: %v", m.Name, err)
-			}
-		}
 
 		// unmap
 		for _, base := range m.bases {
